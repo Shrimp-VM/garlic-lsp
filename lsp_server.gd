@@ -38,7 +38,7 @@ func _exit_tree() -> void:
 		tcpServer.stop()
 		tcpServer = null
 func _process(delta: float) -> void:
-	if tcpServer == null:
+	if tcpServer == null or framing == null or rpcInstance == null:
 		return
 	if clientStream == null and tcpServer.is_connection_available():
 		clientStream = tcpServer.take_connection()
@@ -120,9 +120,9 @@ func handle_notification(message: Dictionary) -> void:
 func build_capabilities() -> Dictionary:
 	return {
 		"capabilities": {
-			"positionEncoding": "utf-32",
+			"positionEncoding": "utf-16",
 			"textDocumentSync": {"openClose": true, "change": 1},
-			"completionProvider": {"triggerCharacters": [], "resolveProvider": false},
+			"completionProvider": {"triggerCharacters": ["=", "("], "resolveProvider": false},
 			"hoverProvider": true,
 			"diagnosticProvider": {"interFileDependencies": false, "workspaceDiagnostics": false}
 		},
@@ -132,27 +132,23 @@ func request_completion(params: Dictionary) -> Array:
 	var uri: String = params.get("textDocument", {}).get("uri", "")
 	if not workspace.has(uri):
 		return []
+	var text: String = workspace.get_text(uri)
 	var position: Dictionary = params.get("position", {})
-	return features.completion(
-		workspace.get_text(uri),
-		int(position.get("line", 0)),
-		int(position.get("character", 0))
-	)
+	var line: int = int(position.get("line", 0))
+	var character: int = utf16_to_char(line_text(text, line), int(position.get("character", 0)))
+	return features.completion(text, line, character)
 func request_hover(params: Dictionary):
 	var uri: String = params.get("textDocument", {}).get("uri", "")
 	if not workspace.has(uri):
 		return null
+	var text: String = workspace.get_text(uri)
 	var position: Dictionary = params.get("position", {})
-	return features.hover(
-		workspace.get_text(uri),
-		int(position.get("line", 0)),
-		int(position.get("character", 0))
-	)
+	var line: int = int(position.get("line", 0))
+	var character: int = utf16_to_char(line_text(text, line), int(position.get("character", 0)))
+	return features.hover(text, line, character)
 func request_diagnostic(params: Dictionary) -> Dictionary:
 	var uri: String = params.get("textDocument", {}).get("uri", "")
-	if not workspace.has(uri):
-		return {"kind": "full", "items": []}
-	return {"kind": "full", "items": analyzer.collect_diagnostics(workspace.get_text(uri))}
+	return {"kind": "full", "items": diagnostics_for(uri)}
 func mark_diagnostics(uri: String) -> void:
 	if not uri.is_empty():
 		pendingDiagnostics[uri] = true
@@ -160,8 +156,48 @@ func flush_diagnostics() -> void:
 	var uris = pendingDiagnostics.keys()
 	pendingDiagnostics = {}
 	for uri in uris:
-		if not workspace.has(uri):
+		publish_diagnostics(uri, diagnostics_for(uri))
+func diagnostics_for(uri: String) -> Array:
+	if not workspace.has(uri):
+		return []
+	var text: String = workspace.get_text(uri)
+	return convert_diagnostics(text, analyzer.collect_diagnostics(text))
+func convert_diagnostics(text: String, items: Array) -> Array:
+	var lines = text.split("\n")
+	var result: Array = []
+	for item in items:
+		var line: int = item["range"]["start"]["line"]
+		if line < 0 or line >= lines.size():
 			continue
-		publish_diagnostics(uri, analyzer.collect_diagnostics(workspace.get_text(uri)))
+		var lineText: String = lines[line]
+		var start: int = char_to_utf16(lineText, item["range"]["start"]["character"])
+		var end: int = char_to_utf16(lineText, item["range"]["end"]["character"])
+		result.append({
+			"range": {
+				"start": {"line": line, "character": start},
+				"end": {"line": line, "character": end}
+			},
+			"severity": item.get("severity", 1),
+			"source": item.get("source", "garlic"),
+			"message": item.get("message", "")
+		})
+	return result
+func line_text(text: String, line: int) -> String:
+	var lines = text.split("\n")
+	if line >= 0 and line < lines.size():
+		return lines[line]
+	return ""
+func utf16_to_char(lineText: String, character: int) -> int:
+	var units = 0
+	for i in range(lineText.length()):
+		if units >= character:
+			return i
+		units += 2 if lineText.unicode_at(i) > 0xFFFF else 1
+	return lineText.length()
+func char_to_utf16(lineText: String, index: int) -> int:
+	var units = 0
+	for i in range(mini(index, lineText.length())):
+		units += 2 if lineText.unicode_at(i) > 0xFFFF else 1
+	return units
 func publish_diagnostics(uri: String, items: Array) -> void:
 	send(rpcInstance.encode_notification("textDocument/publishDiagnostics", {"uri": uri, "diagnostics": items}))
