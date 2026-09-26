@@ -1,7 +1,7 @@
 @tool
 extends RefCounted
 class_name GarlicLspClient
-
+ 
 var stream: StreamPeerTCP
 var framing: GarlicLspFraming
 var nextId: int = 1
